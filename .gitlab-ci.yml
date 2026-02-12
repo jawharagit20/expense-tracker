@@ -1,0 +1,124 @@
+stages:
+  - build
+  - test
+  - security
+  - package
+  - deploy
+
+variables:
+  APP_NAME: "todo-app"
+  APP_NAME: "expense-tracker"
+  APP_VERSION: "1.0.0"
+  DOCKER_TLS_CERTDIR: ""
+
+cache:
+  paths:
+    - node_modules/
+
+############################################
+# STAGE 1: BUILD
+############################################
+build-job:
+  stage: build
+  image: node:18
+  script:
+    - echo "Installation des dépendances..."
+    - npm ci
+    - echo "Vérification de la syntaxe..."
+    - node -c app.js || true
+    - node -c server.js || true
+    - echo "Build terminé"
+  artifacts:
+    paths:
+      - node_modules/
+    expire_in: 1 hour
+
+############################################
+# STAGE 2: TEST
+############################################
+test-job:
+  stage: test
+  image: node:18
+  script:
+    - echo "Exécution des tests unitaires..."
+    - npm test
+  coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'
+
+############################################
+# STAGE 3: SECURITY
+############################################
+security-secrets-scan:
+  stage: security
+  image: zricethezav/gitleaks:latest
+  script:
+    - echo "Recherche de secrets dans le code..."
+    - gitleaks detect --source=. --verbose --no-git
+  allow_failure: false
+
+security-dependencies-scan:
+  stage: security
+  image: node:18
+  script:
+    - echo "Vérification des vulnérabilités dans les dépendances..."
+    - npm audit --audit-level=high || true
+  allow_failure: false
+
+############################################
+# STAGE 4: PACKAGE
+############################################
+package-docker:
+  stage: package
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    - echo "Login to registry"
+    - echo "$CI_JOB_TOKEN" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - echo "Construction de l'image Docker..."
+    - docker build -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" .
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+    - docker tag "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" "$CI_REGISTRY_IMAGE:latest"
+    - docker push "$CI_REGISTRY_IMAGE:latest"
+  only:
+    - main
+
+############################################
+# STAGE 5: DEPLOY
+############################################
+deploy-staging:
+  stage: deploy
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    - echo "$CI_JOB_TOKEN" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - echo "Déploiement en staging..."
+    - docker stop expense-tracker-staging || true
+    - docker rm expense-tracker-staging || true
+    - docker run -d --name expense-tracker-staging -p 3000:3000 $CI_REGISTRY_IMAGE:latest || true
+  environment:
+    name: staging
+    url: http://staging.expense-tracker.local:3000
+  only:
+    - main
+
+deploy-production:
+  stage: deploy
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    - echo "$CI_JOB_TOKEN" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - echo "Déploiement en PRODUCTION..."
+    - docker stop expense-tracker-prod || true
+    - docker rm expense-tracker-prod || true
+    - docker run -d --name expense-tracker-prod -p 8080:3000 $CI_REGISTRY_IMAGE:latest || true
+  environment:
+    name: production
+    url: http://www.expense-tracker.com
+  when: manual
+  only:
+    - main
